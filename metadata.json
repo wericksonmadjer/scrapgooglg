@@ -1,0 +1,6 @@
+{
+  "name": "B2B Lead Extractor Generator",
+  "description": "Generates a Python script using DrissionPage and Pandas to extract B2B leads from Google Maps.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
