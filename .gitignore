@@ -6,3 +6,20 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# ── Dados sensíveis — NÃO enviar ao GitHub ───────────────────────────────────
+# Cookies e sessões do WhatsApp (contêm autenticação das contas)
+whatsapp-session-data/
+whatsapp-sessions.json
+
+# Listas de contatos, leads e disparos
+*.csv
+*.bak
+whatsapp-dispatch-progress.json
+whatsapp-validation-progress.json
+
+# Logs de disparo com dados de contatos
+log_disparo_*.txt
+recuperacao_disparo*.csv
+confirmacao_disparo*.csv
+confirmação_disparo*.csv
