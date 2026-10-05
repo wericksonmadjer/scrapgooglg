@@ -157,6 +157,29 @@ const whatsappActionLimiter = rateLimit({
 let isScrapingActive = false;
 let activeScraperProcess: ChildProcess | null = null;
 
+// Controles da extração ativa (preenchidos pela rota /api/scrape enquanto ela roda)
+let isScraperPaused = false;
+let scraperControl: { pause: () => boolean; resume: () => boolean; cancel: () => boolean } | null = null;
+
+/**
+ * Envia um sinal para o grupo de processos do scraper (Python + Chrome do DrissionPage).
+ * O Python é iniciado com `detached: true`, tornando-se líder do próprio grupo, então
+ * `process.kill(-pid)` atinge também o navegador filho. Fallback: sinal só no Python.
+ */
+function signalScraperGroup(proc: ChildProcess, signal: NodeJS.Signals): boolean {
+  if (!proc.pid) return false;
+  try {
+    process.kill(-proc.pid, signal);
+    return true;
+  } catch {
+    try {
+      return proc.kill(signal);
+    } catch {
+      return false;
+    }
+  }
+}
+
 async function startServer() {
   // Em produção, a ausência de APP_SECRET é um erro fatal.
   if (process.env.NODE_ENV === 'production' && !APP_SECRET) {
@@ -310,20 +333,90 @@ async function startServer() {
     sendEvent('log', `[Init] Iniciando extração: "${nicho}" em ${modeLabel} (máx. ${maxLeads} leads)...`);
 
     isScrapingActive = true;
-    const pyProcess = spawn('python3', ['scraper.py', nicho, local, maxLeads, lat, lng, radius]);
+    isScraperPaused = false;
+    // detached: true → o Python vira líder de um grupo de processos próprio,
+    // permitindo pausar/cancelar também o Chrome que ele abre.
+    const pyProcess = spawn('python3', ['scraper.py', nicho, local, maxLeads, lat, lng, radius], { detached: true });
     activeScraperProcess = pyProcess;
 
-    // Timeout de segurança: encerra o scraper caso exceda 30 minutos
+    let cancelled = false;
+    let finished = false;
+
+    // Timeout de segurança: 30 minutos de tempo ATIVO (o tempo pausado não conta)
     const SCRAPER_TIMEOUT_MS = 30 * 60 * 1000;
-    const timeoutId = setTimeout(() => {
-      if (pyProcess && !pyProcess.killed) {
-        sendEvent('log', '⏰ [Timeout] A extração atingiu o limite de 30 minutos e foi encerrada automaticamente para liberar recursos.');
-        sendEvent('error', 'Tempo limite de 30 minutos excedido.');
-        pyProcess.kill('SIGTERM');
-        isScrapingActive = false;
-        activeScraperProcess = null;
+    let remainingMs = SCRAPER_TIMEOUT_MS;
+    let runStartedAt = Date.now();
+    let timeoutId: NodeJS.Timeout | null = null;
+
+    const armTimeout = () => {
+      runStartedAt = Date.now();
+      timeoutId = setTimeout(() => {
+        if (!finished) {
+          sendEvent('log', '⏰ [Timeout] A extração atingiu o limite de 30 minutos e foi encerrada automaticamente para liberar recursos.');
+          sendEvent('error', 'Tempo limite de 30 minutos excedido.');
+          killScraper();
+        }
+      }, remainingMs);
+    };
+
+    const disarmTimeout = () => {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+        remainingMs = Math.max(0, remainingMs - (Date.now() - runStartedAt));
       }
-    }, SCRAPER_TIMEOUT_MS);
+    };
+
+    // Encerra Python + Chrome. Se estiver pausado, o SIGCONT garante que o SIGTERM seja processado.
+    // Fallback SIGKILL caso algum processo não termine em 5s.
+    function killScraper() {
+      signalScraperGroup(pyProcess, 'SIGTERM');
+      signalScraperGroup(pyProcess, 'SIGCONT');
+      setTimeout(() => {
+        if (pyProcess.exitCode === null && pyProcess.signalCode === null) {
+          signalScraperGroup(pyProcess, 'SIGKILL');
+        }
+      }, 5000);
+    }
+
+    const cleanup = () => {
+      finished = true;
+      disarmTimeout();
+      isScrapingActive = false;
+      isScraperPaused = false;
+      activeScraperProcess = null;
+      scraperControl = null;
+    };
+
+    scraperControl = {
+      pause: () => {
+        if (finished || isScraperPaused) return false;
+        if (!signalScraperGroup(pyProcess, 'SIGSTOP')) return false;
+        isScraperPaused = true;
+        disarmTimeout();
+        sendEvent('paused', {});
+        sendEvent('log', '[Sistema] ⏸️ Extração pausada.');
+        return true;
+      },
+      resume: () => {
+        if (finished || !isScraperPaused) return false;
+        if (!signalScraperGroup(pyProcess, 'SIGCONT')) return false;
+        isScraperPaused = false;
+        armTimeout();
+        sendEvent('resumed', {});
+        sendEvent('log', '[Sistema] ▶️ Extração retomada.');
+        return true;
+      },
+      cancel: () => {
+        if (finished) return false;
+        cancelled = true;
+        sendEvent('log', '[Sistema] ⏹️ Cancelando extração e fechando o navegador...');
+        killScraper();
+        return true;
+      },
+    };
+
+    armTimeout();
 
     // Garante que o evento 'done' seja enviado apenas uma vez ao cliente
     let doneSent = false;
@@ -367,34 +460,42 @@ async function startServer() {
     });
 
     pyProcess.on('close', (code) => {
-      clearTimeout(timeoutId);
-      isScrapingActive = false;
-      activeScraperProcess = null;
-      if (code !== 0) {
-        sendEvent('log', `[Erro] O script finalizou com código ${code}. Verifique os logs acima.`);
+      cleanup();
+      if (cancelled) {
+        sendEvent('done', { total: -1, cancelled: true });
+      } else {
+        if (code !== 0) {
+          sendEvent('log', `[Erro] O script finalizou com código ${code}. Verifique os logs acima.`);
+        }
+        // Fallback: só envia 'done' se o script Python não tiver enviado o seu
+        if (!doneSent) sendEvent('done', { total: -1 });
       }
-      // Fallback: só envia 'done' se o script Python não tiver enviado o seu
-      if (!doneSent) sendEvent('done', { total: -1 });
       if (!res.writableEnded) res.end();
     });
 
     pyProcess.on('error', (err) => {
-      clearTimeout(timeoutId);
-      isScrapingActive = false;
-      activeScraperProcess = null;
+      cleanup();
       sendEvent('error', `Falha ao iniciar processo Python: ${err.message}`);
       if (!res.writableEnded) res.end();
     });
 
-    // Encerra o processo Python se o cliente fechar a conexão
-    req.on('close', () => {
-      clearTimeout(timeoutId);
-      if (pyProcess && !pyProcess.killed) {
-        pyProcess.kill();
+    // Encerra o processo Python (e o Chrome) se o cliente fechar a conexão
+    res.on('close', () => {
+      if (!finished) {
+        killScraper();
+        cleanup();
       }
-      isScrapingActive = false;
-      activeScraperProcess = null;
     });
+  });
+
+  // Controles da extração em andamento: pausar / retomar / cancelar
+  app.post('/api/scrape/:action(pause|resume|cancel)', requireAuth, (req, res) => {
+    if (!scraperControl) {
+      return res.status(409).json({ ok: false, error: 'Nenhuma extração em andamento.' });
+    }
+    const action = req.params.action as 'pause' | 'resume' | 'cancel';
+    const ok = scraperControl[action]();
+    res.status(ok ? 200 : 409).json({ ok, paused: isScraperPaused });
   });
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -789,7 +890,8 @@ async function startServer() {
     console.log('[Server] Encerrando servidor e limpando processos...');
     if (activeScraperProcess && !activeScraperProcess.killed) {
       console.log('[Server] Encerrando processo ativo do scraper...');
-      activeScraperProcess.kill('SIGTERM');
+      signalScraperGroup(activeScraperProcess, 'SIGTERM');
+      signalScraperGroup(activeScraperProcess, 'SIGCONT');
     }
     if (whatsappSender.isRunning()) whatsappSender.stop();
     await sessionManager.shutdownAll();

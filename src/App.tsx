@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Terminal, Download, Play, ShieldCheck, Activity, Users, Mail, AlertTriangle, Square, MapPin, X, Smartphone } from 'lucide-react';
+import { Terminal, Download, Play, ShieldCheck, Activity, Users, Mail, AlertTriangle, Square, MapPin, X, Smartphone, Pause, Loader2 } from 'lucide-react';
 import WhatsAppPanel from './WhatsAppPanel';
-import { sseUrl } from './apiClient';
+import { sseUrl, apiFetch } from './apiClient';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 
@@ -156,6 +156,9 @@ export default function App() {
   const [nicho, setNicho] = useState('Dentistas');
   const [local, setLocal] = useState('São Paulo');
   const [isScraping, setIsScraping] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
+  const [controlBusy, setControlBusy] = useState<null | 'pause' | 'resume' | 'cancel'>(null);
+  const eventSourceRef = useRef<EventSource | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [leads, setLeads] = useState<any[]>([]);
   const logsEndRef = useRef<HTMLDivElement>(null);
@@ -187,6 +190,8 @@ export default function App() {
     if (isScraping) return;
 
     setIsScraping(true);
+    setIsPaused(false);
+    setControlBusy(null);
     setLogs([]);
     setLeads([]);
 
@@ -201,6 +206,15 @@ export default function App() {
     }
 
     const eventSource = new EventSource(sseUrl(apiUrl));
+    eventSourceRef.current = eventSource;
+
+    const finish = () => {
+      setIsScraping(false);
+      setIsPaused(false);
+      setControlBusy(null);
+      eventSource.close();
+      eventSourceRef.current = null;
+    };
 
     eventSource.addEventListener('log', (e) => {
       const message = JSON.parse(e.data);
@@ -212,19 +226,48 @@ export default function App() {
       setLeads((prev) => [...prev, lead]);
     });
 
-    eventSource.addEventListener('done', () => {
-      setLogs((prev) => [...prev, '[Sistema] Processo finalizado com sucesso.']);
-      setIsScraping(false);
-      eventSource.close();
+    eventSource.addEventListener('paused', () => setIsPaused(true));
+    eventSource.addEventListener('resumed', () => setIsPaused(false));
+
+    eventSource.addEventListener('done', (e) => {
+      let cancelled = false;
+      try { cancelled = !!JSON.parse((e as MessageEvent).data)?.cancelled; } catch { /* ignora */ }
+      setLogs((prev) => [
+        ...prev,
+        cancelled
+          ? '[Sistema] Extração cancelada. Os leads já coletados foram mantidos.'
+          : '[Sistema] Processo finalizado com sucesso.',
+      ]);
+      finish();
     });
 
     eventSource.onerror = (err) => {
       console.error('EventSource error:', err);
       setLogs((prev) => [...prev, '[Erro] Falha na conexão com o servidor. Verifique a rede.']);
-      setIsScraping(false);
-      eventSource.close();
+      finish();
     };
   };
+
+  // Pausar / retomar / cancelar a extração em andamento
+  const handleScrapeControl = async (action: 'pause' | 'resume' | 'cancel') => {
+    if (!isScraping || controlBusy) return;
+    setControlBusy(action);
+    try {
+      const res = await apiFetch(`/api/scrape/${action}`, { method: 'POST' });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setLogs((prev) => [...prev, `[Erro] Não foi possível executar a ação: ${data.error || res.status}`]);
+      }
+    } catch {
+      setLogs((prev) => [...prev, '[Erro] Falha ao comunicar com o servidor.']);
+    } finally {
+      // No cancelamento, o estado é liberado quando o evento 'done' chegar
+      if (action !== 'cancel') setControlBusy(null);
+    }
+  };
+
+  // Fecha a conexão SSE se o componente for desmontado (o servidor encerra o scraper)
+  useEffect(() => () => eventSourceRef.current?.close(), []);
 
   const handleDownloadCSV = () => {
     if (leads.length === 0) return;
@@ -420,14 +463,64 @@ export default function App() {
                   />
                 </div>
 
-                <button
-                  onClick={handleStartScraping}
-                  disabled={!canStart}
-                  className="w-full mt-2 flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white font-medium py-3 px-4 rounded-lg transition-colors"
-                >
-                  {isScraping ? <Square className="w-5 h-5 fill-current" /> : <Play className="w-5 h-5 fill-current" />}
-                  {isScraping ? 'Extração em Andamento...' : 'Iniciar Extração Segura'}
-                </button>
+                {!isScraping ? (
+                  <button
+                    id="btn-start-scraping"
+                    onClick={handleStartScraping}
+                    disabled={!canStart}
+                    className="w-full mt-2 flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white font-medium py-3 px-4 rounded-lg transition-colors"
+                  >
+                    <Play className="w-5 h-5 fill-current" />
+                    Iniciar Extração Segura
+                  </button>
+                ) : (
+                  <div className="mt-2 space-y-2">
+                    <div className={`flex items-center justify-center gap-2 text-sm font-medium py-2 rounded-lg border ${
+                      isPaused
+                        ? 'bg-amber-50 border-amber-200 text-amber-800'
+                        : 'bg-indigo-50 border-indigo-200 text-indigo-800'
+                    }`}>
+                      {isPaused ? <Pause className="w-4 h-4" /> : <Loader2 className="w-4 h-4 animate-spin" />}
+                      {controlBusy === 'cancel' ? 'Cancelando...' : isPaused ? 'Extração pausada' : 'Extração em andamento...'}
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      {isPaused ? (
+                        <button
+                          id="btn-resume-scraping"
+                          onClick={() => handleScrapeControl('resume')}
+                          disabled={!!controlBusy}
+                          className="flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-medium py-3 px-4 rounded-lg transition-colors"
+                        >
+                          <Play className="w-4 h-4 fill-current" />
+                          Retomar
+                        </button>
+                      ) : (
+                        <button
+                          id="btn-pause-scraping"
+                          onClick={() => handleScrapeControl('pause')}
+                          disabled={!!controlBusy}
+                          className="flex items-center justify-center gap-2 bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white font-medium py-3 px-4 rounded-lg transition-colors"
+                        >
+                          <Pause className="w-4 h-4 fill-current" />
+                          Pausar
+                        </button>
+                      )}
+                      <button
+                        id="btn-cancel-scraping"
+                        onClick={() => {
+                          if (window.confirm('Cancelar a extração? Os leads já coletados serão mantidos.')) {
+                            handleScrapeControl('cancel');
+                          }
+                        }}
+                        disabled={!!controlBusy}
+                        className="flex items-center justify-center gap-2 bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white font-medium py-3 px-4 rounded-lg transition-colors"
+                      >
+                        <Square className="w-4 h-4 fill-current" />
+                        Cancelar
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
 
