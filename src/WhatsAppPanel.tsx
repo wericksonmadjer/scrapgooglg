@@ -240,18 +240,38 @@ export default function WhatsAppPanel({ extractedLeads }: WhatsAppPanelProps) {
     sendStreamRef.current?.close();
     const es = new EventSource(sseUrl('/api/whatsapp/send-stream'));
 
-    es.addEventListener('stats', e => setStats(JSON.parse(e.data)));
+    es.addEventListener('stats', e => {
+      try {
+        const parsed = JSON.parse(e.data);
+        if (parsed && typeof parsed === 'object') {
+          setStats(prev => ({
+            sent: Number(parsed.sent ?? prev.sent ?? 0),
+            failed: Number(parsed.failed ?? prev.failed ?? 0),
+            pending: Number(parsed.pending ?? prev.pending ?? 0),
+            total: Number(parsed.total ?? prev.total ?? 0),
+          }));
+        }
+      } catch {}
+    });
     es.addEventListener('contacts', e => {
-      const serverContacts = JSON.parse(e.data) as Contact[];
-      if (serverContacts.length > 0) setContacts(serverContacts);
+      try {
+        const serverContacts = JSON.parse(e.data) as Contact[];
+        if (Array.isArray(serverContacts) && serverContacts.length > 0) setContacts(serverContacts);
+      } catch {}
     });
     es.addEventListener('contact_status', e => {
-      const update = JSON.parse(e.data) as { id: string; status: ContactStatus; error?: string; sentAt?: string };
-      setContacts(prev => prev.map(c => c.id === update.id ? { ...c, ...update } : c));
+      try {
+        const update = JSON.parse(e.data) as { id: string; status: ContactStatus; error?: string; sentAt?: string };
+        if (update && update.id) {
+          setContacts(prev => prev.map(c => c.id === update.id ? { ...c, ...update } : c));
+        }
+      } catch {}
     });
     es.addEventListener('log', e => {
-      const msg = JSON.parse(e.data) as string;
-      setSendLogs(prev => [...prev.slice(-99), msg]);
+      try {
+        const msg = JSON.parse(e.data) as string;
+        if (typeof msg === 'string') setSendLogs(prev => [...prev.slice(-99), msg]);
+      } catch {}
     });
     es.addEventListener('started', () => { setSenderRunning(true); setSenderPaused(false); setRotationAlert(null); });
     es.addEventListener('finished', () => { setSenderRunning(false); setSenderPaused(false); });
@@ -259,14 +279,18 @@ export default function WhatsAppPanel({ extractedLeads }: WhatsAppPanelProps) {
     es.addEventListener('paused', () => setSenderPaused(true));
     es.addEventListener('resumed', () => setSenderPaused(false));
     es.addEventListener('session_degraded', e => {
-      const data = JSON.parse(e.data);
-      setSendLogs(prev => [...prev.slice(-99), `⚠️ Conta [${data.sessionName}] degradada após ${data.failCount} falhas consecutivas.`]);
+      try {
+        const data = JSON.parse(e.data);
+        setSendLogs(prev => [...prev.slice(-99), `⚠️ Conta [${data?.sessionName || 'desconhecida'}] degradada após ${data?.failCount ?? 0} falhas consecutivas.`]);
+      } catch {}
     });
     es.addEventListener('rotation_broken', e => {
-      const data = JSON.parse(e.data);
-      setRotationAlert(data);
-      setSenderRunning(false);
-      setSenderPaused(false);
+      try {
+        const data = JSON.parse(e.data);
+        setRotationAlert(data);
+        setSenderRunning(false);
+        setSenderPaused(false);
+      } catch {}
     });
 
     sendStreamRef.current = es;
@@ -277,91 +301,111 @@ export default function WhatsAppPanel({ extractedLeads }: WhatsAppPanelProps) {
     const es = new EventSource(sseUrl('/api/whatsapp/validate-stream'));
 
     es.addEventListener('status', e => {
-      const data = JSON.parse(e.data);
-      setValidatorRunning(data.running);
-      setValidatorResults(data.results || []);
-      
-      if (data.results && data.results.length > 0) {
-        const total = data.results.length;
-        const valid = data.results.filter((r: any) => r && r.status === 'valid').length;
-        const invalid = data.results.filter((r: any) => r && r.status === 'invalid').length;
-        const unknown = data.results.filter((r: any) => r && r.status === 'unknown').length;
-        const pending = data.results.filter((r: any) => r && (r.status === 'pending' || r.status === 'checking')).length;
-        setValidatorStats({ total, valid, invalid, unknown, pending });
-      }
+      try {
+        const data = JSON.parse(e.data);
+        setValidatorRunning(!!data?.running);
+        setValidatorResults(Array.isArray(data?.results) ? data.results : []);
+        
+        if (data?.results && Array.isArray(data.results) && data.results.length > 0) {
+          const total = data.results.length;
+          const valid = data.results.filter((r: any) => r && r.status === 'valid').length;
+          const invalid = data.results.filter((r: any) => r && r.status === 'invalid').length;
+          const unknown = data.results.filter((r: any) => r && r.status === 'unknown').length;
+          const pending = data.results.filter((r: any) => r && (r.status === 'pending' || r.status === 'checking')).length;
+          setValidatorStats({ total, valid, invalid, unknown, pending });
+        }
+      } catch {}
     });
 
     es.addEventListener('started', e => {
-      const data = JSON.parse(e.data);
-      setValidatorRunning(true);
-      setValidatorDone(false);
-      setValidatorStats({ total: data.total, pending: data.total, valid: 0, invalid: 0, unknown: 0 });
-      setValidatorResults([]);
+      try {
+        const data = JSON.parse(e.data);
+        const total = Number(data?.total ?? 0);
+        setValidatorRunning(true);
+        setValidatorDone(false);
+        setValidatorStats({ total, pending: total, valid: 0, invalid: 0, unknown: 0 });
+        setValidatorResults([]);
+      } catch {}
     });
 
     es.addEventListener('progress', e => {
-      const data = JSON.parse(e.data);
-      setValidatorResults(prev => {
-        const copy = [...prev];
-        copy[data.index] = data.result;
-        return copy;
-      });
+      try {
+        const data = JSON.parse(e.data);
+        if (data && typeof data.index === 'number') {
+          setValidatorResults(prev => {
+            const copy = [...prev];
+            copy[data.index] = data.result;
+            return copy;
+          });
+        }
+      } catch {}
     });
 
     es.addEventListener('result', e => {
-      const data = JSON.parse(e.data);
-      setValidatorResults(prev => {
-        const copy = [...prev];
-        copy[data.index] = data.result;
-        return copy;
-      });
-      setValidatorStats(prev => {
-        const stats = { valid: 0, invalid: 0, unknown: 0, pending: 0, total: prev.total };
-        setValidatorResults(current => {
-          current.forEach(r => {
-            if (r) {
-              if (r.status === 'valid') stats.valid++;
-              else if (r.status === 'invalid') stats.invalid++;
-              else if (r.status === 'unknown') stats.unknown++;
-            }
+      try {
+        const data = JSON.parse(e.data);
+        if (data && typeof data.index === 'number') {
+          setValidatorResults(prev => {
+            const copy = [...prev];
+            copy[data.index] = data.result;
+            return copy;
           });
-          stats.pending = stats.total - (stats.valid + stats.invalid + stats.unknown);
-          return current;
+        }
+        setValidatorStats(prev => {
+          const safeTotal = prev?.total ?? 0;
+          const stats = { valid: 0, invalid: 0, unknown: 0, pending: 0, total: safeTotal };
+          setValidatorResults(current => {
+            current.forEach(r => {
+              if (r) {
+                if (r.status === 'valid') stats.valid++;
+                else if (r.status === 'invalid') stats.invalid++;
+                else if (r.status === 'unknown') stats.unknown++;
+              }
+            });
+            stats.pending = Math.max(0, stats.total - (stats.valid + stats.invalid + stats.unknown));
+            return current;
+          });
+          return stats;
         });
-        return stats;
-      });
+      } catch {}
     });
 
     es.addEventListener('log', e => {
-      const msg = JSON.parse(e.data) as string;
-      setValidateLogs(prev => [...prev.slice(-99), msg]);
+      try {
+        const msg = JSON.parse(e.data) as string;
+        if (typeof msg === 'string') setValidateLogs(prev => [...prev.slice(-99), msg]);
+      } catch {}
     });
 
     es.addEventListener('done', e => {
-      const data = JSON.parse(e.data);
-      setValidatorRunning(false);
-      setValidatorDone(true);
-      setValidatorResults(data.results || []);
-      setValidatorStats({
-        valid: data.valid,
-        invalid: data.invalid,
-        unknown: data.unknown,
-        pending: data.pending,
-        total: data.total
-      });
+      try {
+        const data = JSON.parse(e.data);
+        setValidatorRunning(false);
+        setValidatorDone(true);
+        setValidatorResults(Array.isArray(data?.results) ? data.results : []);
+        setValidatorStats({
+          valid: Number(data?.valid ?? 0),
+          invalid: Number(data?.invalid ?? 0),
+          unknown: Number(data?.unknown ?? 0),
+          pending: Number(data?.pending ?? 0),
+          total: Number(data?.total ?? 0)
+        });
+      } catch {}
     });
 
     es.addEventListener('stopped', e => {
-      const data = JSON.parse(e.data);
-      setValidatorRunning(false);
-      setValidatorResults(data.results || []);
-      setValidatorStats({
-        valid: data.valid,
-        invalid: data.invalid,
-        unknown: data.unknown,
-        pending: data.pending,
-        total: data.results?.length || 0
-      });
+      try {
+        const data = JSON.parse(e.data);
+        setValidatorRunning(false);
+        setValidatorResults(Array.isArray(data?.results) ? data.results : []);
+        setValidatorStats({
+          valid: Number(data?.valid ?? 0),
+          invalid: Number(data?.invalid ?? 0),
+          unknown: Number(data?.unknown ?? 0),
+          pending: Number(data?.pending ?? 0),
+          total: Array.isArray(data?.results) ? data.results.length : 0
+        });
+      } catch {}
     });
 
     es.addEventListener('error', (e: any) => {
@@ -717,8 +761,11 @@ export default function WhatsAppPanel({ extractedLeads }: WhatsAppPanelProps) {
     error: { label: 'Erro', color: 'text-red-600', bg: 'bg-red-50', dot: 'bg-red-500', Icon: XCircle },
   };
 
-  const sc = sessionStatusConfig[sessionStatus];
-  const progressPct = stats.total > 0 ? Math.round(((stats.sent + stats.failed) / stats.total) * 100) : 0;
+  const sc = sessionStatusConfig[sessionStatus] || sessionStatusConfig.idle;
+  const safeStatsTotal = Number(stats?.total ?? 0);
+  const safeStatsSent = Number(stats?.sent ?? 0);
+  const safeStatsFailed = Number(stats?.failed ?? 0);
+  const progressPct = safeStatsTotal > 0 ? Math.round(((safeStatsSent + safeStatsFailed) / safeStatsTotal) * 100) : 0;
 
   const previewMessage = message
     .replace(/\{nome\}/gi, 'João Silva')
@@ -1379,32 +1426,32 @@ export default function WhatsAppPanel({ extractedLeads }: WhatsAppPanelProps) {
 
               <div className="grid grid-cols-2 gap-2">
                 {[
-                  { label: 'Total', value: validatorStats.total, color: 'text-slate-700', bg: 'bg-slate-50 border-slate-200' },
-                  { label: 'Válidos', value: validatorStats.valid, color: 'text-emerald-700', bg: 'bg-emerald-50 border-emerald-200' },
-                  { label: 'Inválidos', value: validatorStats.invalid, color: 'text-red-700', bg: 'bg-red-50 border-red-200' },
-                  { label: 'Pendentes', value: validatorStats.pending, color: 'text-amber-700', bg: 'bg-amber-50 border-amber-200' },
+                  { label: 'Total', value: validatorStats?.total ?? 0, color: 'text-slate-700', bg: 'bg-slate-50 border-slate-200' },
+                  { label: 'Válidos', value: validatorStats?.valid ?? 0, color: 'text-emerald-700', bg: 'bg-emerald-50 border-emerald-200' },
+                  { label: 'Inválidos', value: validatorStats?.invalid ?? 0, color: 'text-red-700', bg: 'bg-red-50 border-red-200' },
+                  { label: 'Pendentes', value: validatorStats?.pending ?? 0, color: 'text-amber-700', bg: 'bg-amber-50 border-amber-200' },
                 ].map(s => (
                   <div key={s.label} className={`${s.bg} border rounded-lg p-2.5 text-center`}>
                     <div className={`text-xl font-bold ${s.color}`}>{s.value}</div>
-                    <div className="text-[10px] text-slate-500 mt-0.5">{s.label}</div>
+                    <div className="text-[11px] text-slate-500 mt-0.5">{s.label}</div>
                   </div>
                 ))}
               </div>
 
-              {validatorStats.total > 0 && (
+              {(validatorStats?.total ?? 0) > 0 && (
                 <div className="space-y-1 pt-1">
                   <div className="flex justify-between text-[11px] text-slate-500">
                     <span>
-                      {validatorStats.total - validatorStats.pending} de {validatorStats.total} verificados
+                      {(validatorStats?.total ?? 0) - (validatorStats?.pending ?? 0)} de {validatorStats?.total ?? 0} verificados
                     </span>
                     <span>
-                      {Math.round(((validatorStats.total - validatorStats.pending) / validatorStats.total) * 100)}%
+                      {Math.round((((validatorStats?.total ?? 0) - (validatorStats?.pending ?? 0)) / Math.max(1, validatorStats?.total ?? 1)) * 100)}%
                     </span>
                   </div>
                   <div className="w-full bg-slate-200 rounded-full h-2.5 overflow-hidden">
                     <div
                       className="h-full rounded-full bg-gradient-to-r from-emerald-500 to-emerald-600 transition-all duration-500"
-                      style={{ width: `${Math.round(((validatorStats.total - validatorStats.pending) / validatorStats.total) * 100)}%` }}
+                      style={{ width: `${Math.round((((validatorStats?.total ?? 0) - (validatorStats?.pending ?? 0)) / Math.max(1, validatorStats?.total ?? 1)) * 100)}%` }}
                     />
                   </div>
                 </div>
@@ -1757,10 +1804,10 @@ export default function WhatsAppPanel({ extractedLeads }: WhatsAppPanelProps) {
               {/* Estatísticas */}
               <div className="grid grid-cols-4 gap-3">
                 {[
-                  { label: 'Total', value: stats.total, color: 'text-slate-700', bg: 'bg-slate-50 border-slate-200' },
-                  { label: 'Enviados', value: stats.sent, color: 'text-emerald-700', bg: 'bg-emerald-50 border-emerald-200' },
-                  { label: 'Falhas', value: stats.failed, color: 'text-red-700', bg: 'bg-red-50 border-red-200' },
-                  { label: 'Pendentes', value: stats.pending, color: 'text-amber-700', bg: 'bg-amber-50 border-amber-200' },
+                  { label: 'Total', value: stats?.total ?? 0, color: 'text-slate-700', bg: 'bg-slate-50 border-slate-200' },
+                  { label: 'Enviados', value: stats?.sent ?? 0, color: 'text-emerald-700', bg: 'bg-emerald-50 border-emerald-200' },
+                  { label: 'Falhas', value: stats?.failed ?? 0, color: 'text-red-700', bg: 'bg-red-50 border-red-200' },
+                  { label: 'Pendentes', value: stats?.pending ?? 0, color: 'text-amber-700', bg: 'bg-amber-50 border-amber-200' },
                 ].map(s => (
                   <div key={s.label} className={`${s.bg} border rounded-xl p-3 text-center`}>
                     <div className={`text-2xl font-bold ${s.color}`}>{s.value}</div>
@@ -1770,10 +1817,10 @@ export default function WhatsAppPanel({ extractedLeads }: WhatsAppPanelProps) {
               </div>
 
               {/* Barra de progresso */}
-              {stats.total > 0 && (
+              {(stats?.total ?? 0) > 0 && (
                 <div>
                   <div className="flex justify-between text-xs text-slate-500 mb-1">
-                    <span>{stats.sent + stats.failed} de {stats.total}</span>
+                    <span>{(stats?.sent ?? 0) + (stats?.failed ?? 0)} de {stats?.total ?? 0}</span>
                     <span>{progressPct}%</span>
                   </div>
                   <div className="w-full bg-slate-200 rounded-full h-3 overflow-hidden">
