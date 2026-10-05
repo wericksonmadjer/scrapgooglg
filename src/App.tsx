@@ -241,9 +241,19 @@ export default function App() {
       finish();
     });
 
-    eventSource.onerror = (err) => {
+    eventSource.onerror = async (err) => {
       console.error('EventSource error:', err);
-      setLogs((prev) => [...prev, '[Erro] Falha na conexão com o servidor. Verifique a rede.']);
+      try {
+        const check = await fetch(sseUrl(apiUrl));
+        if (!check.ok) {
+          const errData = await check.json().catch(() => ({}));
+          const errMsg = errData.error || `Erro HTTP ${check.status}`;
+          setLogs((prev) => [...prev, `[Erro] ${errMsg}`]);
+          finish();
+          return;
+        }
+      } catch {}
+      setLogs((prev) => [...prev, '[Erro] Falha na conexão com o servidor. Verifique a rede ou se o servidor está ativo.']);
       finish();
     };
   };

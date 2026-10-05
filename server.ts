@@ -125,29 +125,34 @@ function corsMiddleware(req: Request, res: Response, next: NextFunction) {
 }
 
 // ── Rate Limiters (Proteção contra DoS / Abuso) ──────────────────────────────
+const isLocalIp = (ip?: string) => ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
 
 // Rate limiter geral para todas as rotas da API (/api/*)
+// Não bloqueia chamadas em localhost (evita que o polling de streams trave o app local)
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutos
-  max: 300, // máx 300 requisições por janela por IP
+  max: process.env.NODE_ENV === 'production' ? 1000 : 50000,
+  skip: (req) => isLocalIp(req.ip || req.socket.remoteAddress),
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Muitas requisições enviadas à API. Tente novamente mais tarde.' },
 });
 
-// Rate limiter específico para o scraper (cada execução consome CPU, RAM e instâncias Chrome)
+// Rate limiter específico para o scraper
 const scraperLimiter = rateLimit({
-  windowMs: 5 * 60 * 1000, // 5 minutos
-  max: 10, // máx 10 tentativas de extração a cada 5 min por IP
+  windowMs: 1 * 60 * 1000, // 1 minuto
+  max: 30,
+  skip: (req) => isLocalIp(req.ip || req.socket.remoteAddress),
   standardHeaders: true,
   legacyHeaders: false,
-  message: { error: 'Muitas tentativas de inicialização de extração. Aguarde alguns minutos.' },
+  message: { error: 'Muitas tentativas de inicialização de extração. Aguarde alguns instantes.' },
 });
 
 // Rate limiter para envio e validação no WhatsApp
 const whatsappActionLimiter = rateLimit({
   windowMs: 1 * 60 * 1000, // 1 minuto
-  max: 30, // máx 30 ações por minuto por IP
+  max: 60,
+  skip: (req) => isLocalIp(req.ip || req.socket.remoteAddress),
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Limite de ações do WhatsApp atingido. Aguarde um minuto.' },
